@@ -95,8 +95,6 @@ public final class ChannelImpl implements Channel {
 
    private ChannelHandler handler;
 
-   private Packet response;
-
    private final java.util.Queue<Packet> resendCache;
 
    private final LinkedList<CompletableFuture<Packet>> pendingQueue = new LinkedList<>();
@@ -216,9 +214,9 @@ public final class ChannelImpl implements Channel {
       lock.lock();
 
       try {
-         response = new ActiveMQExceptionMessage(ActiveMQClientMessageBundle.BUNDLE.unblockingACall(cause));
+         Packet response = new ActiveMQExceptionMessage(ActiveMQClientMessageBundle.BUNDLE.unblockingACall(cause));
 
-         sendCondition.signal();
+         pendingQueue.forEach(future -> future.complete(response));
       } finally {
          lock.unlock();
       }
@@ -632,6 +630,8 @@ public final class ChannelImpl implements Channel {
          firstStoredCommandID = 0;
 
          resendCache.clear();
+
+         pendingQueue.forEach(future -> future.complete(null));
       }
    }
 
