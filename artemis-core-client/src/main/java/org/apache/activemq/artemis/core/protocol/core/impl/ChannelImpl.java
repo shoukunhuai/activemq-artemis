@@ -355,7 +355,9 @@ public final class ChannelImpl implements Channel {
          throw new IllegalStateException("Cannot do a blocking call timeout on a server side connection");
       }
 
-      Packet response = null;
+      Packet response;
+
+      CompletableFuture<Packet> future = new CompletableFuture<>();
       // Synchronized since can't be called concurrently by more than one thread and this can occur
       // E.g. blocking acknowledge() from inside a message handler at some time as other operation on main thread
       synchronized (sendBlockingLock) {
@@ -374,7 +376,6 @@ public final class ChannelImpl implements Channel {
                addResendPacket(packet);
             }
 
-            CompletableFuture<Packet> future = new CompletableFuture<>();
             pendingQueue.add(future);
 
             checkReconnectID(reconnectID);
@@ -384,52 +385,52 @@ public final class ChannelImpl implements Channel {
             }
 
             connection.getTransportConnection().write(buffer, false, false);
-
-            final long start = System.currentTimeMillis();
-            long toWait = connection.getBlockingCallTimeout();
-
-            try {
-               response = future.get(toWait, TimeUnit.MILLISECONDS);
-            } catch (InterruptedException ie) {
-               throw new ActiveMQInterruptedException(ie);
-            } catch (ExecutionException ee) {
-               if (ee.getCause() instanceof ActiveMQException) {
-                  throw (ActiveMQException) ee.getCause();
-               } else {
-                  throw new ActiveMQException(ee.getMessage());
-               }
-            } catch (Exception e) {
-               throw new ActiveMQException(e.getMessage());
-            }
-
-            final long now = System.currentTimeMillis();
-
-            toWait -= now - start;
-
-            if (response != null && response.getType() != PacketImpl.EXCEPTION && response.getType() != expectedPacket) {
-               ActiveMQClientLogger.LOGGER.packetOutOfOrder(response, new Exception("trace"));
-            }
-
-            if (closed && toWait > 0 && response == null) {
-               Throwable cause = ActiveMQClientMessageBundle.BUNDLE.connectionDestroyed();
-               throw ActiveMQClientMessageBundle.BUNDLE.unblockingACall(cause);
-            }
-
-            if (response == null) {
-               throw ActiveMQClientMessageBundle.BUNDLE.timedOutSendingPacket(connection.getBlockingCallTimeout(), packet.getType());
-            }
-
-            if (response.getType() == PacketImpl.EXCEPTION) {
-               final ActiveMQExceptionMessage mem = (ActiveMQExceptionMessage) response;
-
-               ActiveMQException e = mem.getException();
-
-               e.fillInStackTrace();
-
-               throw e;
-            }
          } finally {
             lock.unlock();
+         }
+
+         final long start = System.currentTimeMillis();
+         long toWait = connection.getBlockingCallTimeout();
+
+         try {
+            response = future.get(toWait, TimeUnit.MILLISECONDS);
+         } catch (InterruptedException ie) {
+            throw new ActiveMQInterruptedException(ie);
+         } catch (ExecutionException ee) {
+            if (ee.getCause() instanceof ActiveMQException) {
+               throw (ActiveMQException) ee.getCause();
+            } else {
+               throw new ActiveMQException(ee.getMessage());
+            }
+         } catch (Exception e) {
+            throw new ActiveMQException(e.getMessage());
+         }
+
+         final long now = System.currentTimeMillis();
+
+         toWait -= now - start;
+
+         if (response != null && response.getType() != PacketImpl.EXCEPTION && response.getType() != expectedPacket) {
+            ActiveMQClientLogger.LOGGER.packetOutOfOrder(response, new Exception("trace"));
+         }
+
+         if (closed && toWait > 0 && response == null) {
+            Throwable cause = ActiveMQClientMessageBundle.BUNDLE.connectionDestroyed();
+            throw ActiveMQClientMessageBundle.BUNDLE.unblockingACall(cause);
+         }
+
+         if (response == null) {
+            throw ActiveMQClientMessageBundle.BUNDLE.timedOutSendingPacket(connection.getBlockingCallTimeout(), packet.getType());
+         }
+
+         if (response.getType() == PacketImpl.EXCEPTION) {
+            final ActiveMQExceptionMessage mem = (ActiveMQExceptionMessage) response;
+
+            ActiveMQException e = mem.getException();
+
+            e.fillInStackTrace();
+
+            throw e;
          }
 
          return response;
