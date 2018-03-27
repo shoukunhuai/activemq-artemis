@@ -17,8 +17,12 @@
 package org.apache.activemq.artemis.core.protocol.core.impl;
 
 import java.util.EnumSet;
+import java.util.LinkedList;
 import java.util.List;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Condition;
@@ -95,6 +99,8 @@ public final class ChannelImpl implements Channel {
    private Packet response;
 
    private final java.util.Queue<Packet> resendCache;
+
+   private final LinkedList<CompletableFuture<Packet>> pendingQueue = new LinkedList<>();
 
    private int firstStoredCommandID;
 
@@ -352,6 +358,7 @@ public final class ChannelImpl implements Channel {
          throw new IllegalStateException("Cannot do a blocking call timeout on a server side connection");
       }
 
+      Packet response = null;
       // Synchronized since can't be called concurrently by more than one thread and this can occur
       // E.g. blocking acknowledge() from inside a message handler at some time as other operation on main thread
       synchronized (sendBlockingLock) {
@@ -366,11 +373,12 @@ public final class ChannelImpl implements Channel {
                waitForFailOver("RemotingConnectionID=" + (connection == null ? "NULL" : connection.getID()) + " timed-out waiting for fail-over condition on blocking send");
             }
 
-            response = null;
-
             if (resendCache != null && packet.isRequiresConfirmations()) {
                addResendPacket(packet);
             }
+
+            CompletableFuture<Packet> future = new CompletableFuture<>();
+            pendingQueue.add(future);
 
             checkReconnectID(reconnectID);
 
@@ -380,30 +388,29 @@ public final class ChannelImpl implements Channel {
 
             connection.getTransportConnection().write(buffer, false, false);
 
+            final long start = System.currentTimeMillis();
             long toWait = connection.getBlockingCallTimeout();
 
-            long start = System.currentTimeMillis();
-
-            while (!closed && (response == null || (response.getType() != PacketImpl.EXCEPTION && response.getType() != expectedPacket)) && toWait > 0) {
-               try {
-                  sendCondition.await(toWait, TimeUnit.MILLISECONDS);
-               } catch (InterruptedException e) {
-                  throw new ActiveMQInterruptedException(e);
+            try {
+               response = future.get(toWait, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException ie) {
+               throw new ActiveMQInterruptedException(ie);
+            } catch (ExecutionException ee) {
+               if (ee.getCause() instanceof ActiveMQException) {
+                  throw (ActiveMQException) ee.getCause();
+               } else {
+                  throw new ActiveMQException(ee.getMessage());
                }
+            } catch (Exception e) {
+               throw new ActiveMQException(e.getMessage());
+            }
 
-               if (response != null && response.getType() != PacketImpl.EXCEPTION && response.getType() != expectedPacket) {
-                  ActiveMQClientLogger.LOGGER.packetOutOfOrder(response, new Exception("trace"));
-               }
+            final long now = System.currentTimeMillis();
 
-               if (closed) {
-                  break;
-               }
+            toWait -= now - start;
 
-               final long now = System.currentTimeMillis();
-
-               toWait -= now - start;
-
-               start = now;
+            if (response != null && response.getType() != PacketImpl.EXCEPTION && response.getType() != expectedPacket) {
+               ActiveMQClientLogger.LOGGER.packetOutOfOrder(response, new Exception("trace"));
             }
 
             if (closed && toWait > 0 && response == null) {
@@ -647,11 +654,16 @@ public final class ChannelImpl implements Channel {
          if (packet.isResponse()) {
             confirm(packet);
 
+            CompletableFuture<Packet> f;
             lock.lock();
 
             try {
-               response = packet;
-               sendCondition.signal();
+               f = pendingQueue.poll();
+               if (f == null) {
+                  ActiveMQClientLogger.LOGGER.packetOutOfOrder(packet, new Exception("trace"));
+               } else {
+                  f.complete(packet);
+               }
             } finally {
                lock.unlock();
             }
