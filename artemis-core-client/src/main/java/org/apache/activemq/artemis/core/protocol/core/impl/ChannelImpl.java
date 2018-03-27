@@ -19,7 +19,6 @@ package org.apache.activemq.artemis.core.protocol.core.impl;
 import java.util.EnumSet;
 import java.util.LinkedList;
 import java.util.List;
-import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
