@@ -23,6 +23,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
@@ -402,6 +403,8 @@ public final class ChannelImpl implements Channel {
             } else {
                throw new ActiveMQException(ee.getMessage());
             }
+         } catch (TimeoutException te) {
+            response = null;
          } catch (Exception e) {
             throw new ActiveMQException(e.getMessage());
          }
