@@ -17,7 +17,9 @@
 package org.apache.activemq.artemis.core.protocol.core.impl;
 
 import java.util.EnumSet;
+import java.util.LinkedList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -92,9 +94,9 @@ public final class ChannelImpl implements Channel {
 
    private ChannelHandler handler;
 
-   private Packet response;
-
    private final java.util.Queue<Packet> resendCache;
+
+   private final LinkedList<CompletableFuture<Packet>> pendingQueue = new LinkedList<>();
 
    private int firstStoredCommandID;
 
@@ -211,8 +213,9 @@ public final class ChannelImpl implements Channel {
       lock.lock();
 
       try {
-         response = new ActiveMQExceptionMessage(ActiveMQClientMessageBundle.BUNDLE.unblockingACall(cause));
+         Packet response = new ActiveMQExceptionMessage(ActiveMQClientMessageBundle.BUNDLE.unblockingACall(cause));
 
+         pendingQueue.forEach(f -> f.complete(response));
          sendCondition.signal();
       } finally {
          lock.unlock();
@@ -352,6 +355,8 @@ public final class ChannelImpl implements Channel {
          throw new IllegalStateException("Cannot do a blocking call timeout on a server side connection");
       }
 
+      Packet response;
+
       // Synchronized since can't be called concurrently by more than one thread and this can occur
       // E.g. blocking acknowledge() from inside a message handler at some time as other operation on main thread
       synchronized (sendBlockingLock) {
@@ -366,11 +371,12 @@ public final class ChannelImpl implements Channel {
                waitForFailOver("RemotingConnectionID=" + (connection == null ? "NULL" : connection.getID()) + " timed-out waiting for fail-over condition on blocking send");
             }
 
-            response = null;
+            CompletableFuture<Packet> future = new CompletableFuture<>();
 
             if (resendCache != null && packet.isRequiresConfirmations()) {
                addResendPacket(packet);
             }
+            pendingQueue.offer(future);
 
             checkReconnectID(reconnectID);
 
@@ -384,9 +390,11 @@ public final class ChannelImpl implements Channel {
 
             long start = System.currentTimeMillis();
 
+            response = future.getNow(null);
             while (!closed && (response == null || (response.getType() != PacketImpl.EXCEPTION && response.getType() != expectedPacket)) && toWait > 0) {
                try {
                   sendCondition.await(toWait, TimeUnit.MILLISECONDS);
+                  response = future.getNow(null);
                } catch (InterruptedException e) {
                   throw new ActiveMQInterruptedException(e);
                }
@@ -627,6 +635,7 @@ public final class ChannelImpl implements Channel {
 
          resendCache.clear();
       }
+      pendingQueue.forEach(f -> f.complete(null));
    }
 
    @Override
@@ -650,7 +659,7 @@ public final class ChannelImpl implements Channel {
             lock.lock();
 
             try {
-               response = packet;
+               pendingQueue.poll().complete(packet);
                sendCondition.signal();
             } finally {
                lock.unlock();
