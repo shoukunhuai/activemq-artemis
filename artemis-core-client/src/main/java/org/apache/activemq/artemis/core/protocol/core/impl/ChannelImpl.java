@@ -216,6 +216,7 @@ public final class ChannelImpl implements Channel {
          Packet response = new ActiveMQExceptionMessage(ActiveMQClientMessageBundle.BUNDLE.unblockingACall(cause));
 
          pendingQueue.forEach(f -> f.complete(response));
+         pendingQueue.clear();
          sendCondition.signal();
       } finally {
          lock.unlock();
@@ -636,6 +637,7 @@ public final class ChannelImpl implements Channel {
          resendCache.clear();
       }
       pendingQueue.forEach(f -> f.complete(null));
+      pendingQueue.clear();
    }
 
    @Override
